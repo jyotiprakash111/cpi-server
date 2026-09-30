@@ -51,7 +51,8 @@ npm start
 
 ## 🔬 Core Service Modules
 
-* **`DeduplicationService` ([src/services/deduplication.service.ts](file:///Users/apple/Downloads/CPI/cpi-backend/src/services/deduplication.service.ts))**: Calculates MD5 byte hashes and 64-bit visual difference hashes (`dHash`) using `sharp`. Evaluates Hamming distances ($\le 4$ = duplicate).
+* **`DeduplicationService` ([src/services/deduplication.service.ts](file:///Users/apple/Downloads/CPI/cpi-backend/src/services/deduplication.service.ts))**: Calculates MD5 byte hashes and 512-bit Dual Bidirectional visual difference hashes (`dHash` 16x16 H+V) using `sharp`. Evaluates Hamming distances ($\le 10$ = duplicate collision, separating true duplicates with an 84-bit margin and 0.00% false alarms).
 * **`ManifestService` ([src/services/manifest.service.ts](file:///Users/apple/Downloads/CPI/cpi-backend/src/services/manifest.service.ts))**: Multi-strategy matching against master manifests.
-* **`ReconciliationService` ([src/services/reconciliation.service.ts](file:///Users/apple/Downloads/CPI/cpi-backend/src/services/reconciliation.service.ts))**: Manages the quarantine queue and zero-loss accounting balance.
+* **`ReconciliationService` ([src/services/reconciliation.service.ts](file:///Users/apple/Downloads/CPI/cpi-backend/src/services/reconciliation.service.ts))**: Manages the supervisor quarantine queue with per-unit isolation (milestones never frozen; 24 units released for payment) and zero-loss accounting balance.
 * **`PdfService` ([src/services/pdf.service.ts](file:///Users/apple/Downloads/CPI/cpi-backend/src/services/pdf.service.ts))**: Compiles official `IRR_<IAS_NO>.pdf` inspection dossiers with labeled photo plates using `pdf-lib`.
+

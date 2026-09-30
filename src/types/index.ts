@@ -21,6 +21,7 @@ export interface PhotoEntry {
   fileBuffer?: Buffer;
   md5: string;
   dHash: string;
+  pHash?: string;
   capturedAt: string;
   isMock: boolean;
 }
@@ -51,7 +52,7 @@ export interface DuplicateMatch {
   photo2: string;
   unit2: string;
   beneficiary2: string;
-  hashType: 'MD5_EXACT' | 'PHASH_SIMILAR';
+  hashType: 'MD5_EXACT' | 'PHASH_DCT_SIMILAR' | 'DHASH_SPATIAL_SIMILAR' | 'PHASH_SIMILAR';
   hammingDistance: number;
 }
 

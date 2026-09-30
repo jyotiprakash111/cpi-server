@@ -2,17 +2,89 @@ import crypto from 'crypto';
 import sharp from 'sharp';
 import { DuplicateMatch, PhotoEntry } from '../types/index.js';
 
+function dct1D(vec: number[]): number[] {
+  const N = vec.length;
+  const out = new Array(N);
+  for (let k = 0; k < N; k++) {
+    let sum = 0;
+    for (let n = 0; n < N; n++) {
+      sum += vec[n] * Math.cos((Math.PI / N) * (n + 0.5) * k);
+    }
+    out[k] = sum;
+  }
+  return out;
+}
+
+function dct2D(matrix: number[][], size: number): number[][] {
+  const rows = matrix.map((r) => dct1D(r));
+  const cols = new Array(size).fill(0).map(() => new Array(size));
+  for (let c = 0; c < size; c++) {
+    const colVec = rows.map((r) => r[c]);
+    const dctCol = dct1D(colVec);
+    for (let r = 0; r < size; r++) {
+      cols[r][c] = dctCol[r];
+    }
+  }
+  return cols;
+}
+
 export class DeduplicationService {
   /**
-   * Calculates standard MD5 hash for exact byte matching
+   * Layer 1: Calculates standard MD5 hash for exact byte matching (O(1))
    */
   static calculateMd5(buffer: Buffer): string {
     return crypto.createHash('md5').update(buffer).digest('hex');
   }
 
   /**
-   * Computes 512-bit Dual Bidirectional dHash (16x16 Horizontal + Vertical gradients)
-   * Solves low-frequency luminance collapse on homogeneous scenes (like light fixtures)
+   * Layer 2: Computes 64-bit 2D DCT Perceptual Hash (Frequency Domain)
+   * Invariant to image scaling (e.g. 640x480 -> 600x450), recompression & aspect ratio shifts
+   */
+  static async computePHash(imageBuffer: Buffer): Promise<string> {
+    try {
+      const size = 32;
+      const { data } = await sharp(imageBuffer)
+        .resize(size, size, { fit: 'fill' })
+        .grayscale()
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+
+      const matrix: number[][] = [];
+      for (let r = 0; r < size; r++) {
+        const row: number[] = [];
+        for (let c = 0; c < size; c++) {
+          row.push(data[r * size + c]);
+        }
+        matrix.push(row);
+      }
+
+      const dct = dct2D(matrix, size);
+
+      // Extract 8x8 low frequency DCT coefficients (excluding DC component at [0,0])
+      const lowFreq: number[] = [];
+      for (let r = 0; r < 8; r++) {
+        for (let c = 0; c < 8; c++) {
+          if (r === 0 && c === 0) continue;
+          lowFreq.push(dct[r][c]);
+        }
+      }
+
+      const sorted = [...lowFreq].sort((a, b) => a - b);
+      const median = sorted[Math.floor(sorted.length / 2)];
+
+      let hash = '';
+      for (const v of lowFreq) {
+        hash += v > median ? '1' : '0';
+      }
+      return BigInt('0b' + hash).toString(16).padStart(16, '0');
+    } catch {
+      return this.calculateMd5(imageBuffer).slice(0, 16);
+    }
+  }
+
+  /**
+   * Layer 3: Computes 512-bit Dual Bidirectional dHash (16x16 Horizontal + Vertical gradients)
+   * Spatial gradient sensitivity to resolve flat/homogeneous scenes (e.g. lights_accessories)
    */
   static async computeDHash(imageBuffer: Buffer): Promise<string> {
     try {
@@ -49,13 +121,12 @@ export class DeduplicationService {
       const hexV = BigInt('0b' + hashV).toString(16).padStart(64, '0');
       return hexH + hexV;
     } catch {
-      // Fallback for mock/synthetic buffers
       return this.calculateMd5(imageBuffer).repeat(4).slice(0, 128);
     }
   }
 
   /**
-   * Calculates Hamming Distance across 512-bit dual hashes
+   * Calculates Hamming Distance between hex hash strings
    */
   static hammingDistance(hash1: string, hash2: string): number {
     try {
@@ -77,8 +148,8 @@ export class DeduplicationService {
   }
 
   /**
-   * Slot-Aware Cross-Checking with empirically verified thresholds
-   * - Threshold <= 10 on 512-bit hash (< 2.0% bit difference)
+   * Multi-Scale Slot-Aware Collision Checker
+   * Evaluates Layer 1 (MD5), Layer 2 (DCT pHash <= 4), and Layer 3 (Dual dHash <= 10)
    */
   static checkCollisions(
     incoming: PhotoEntry[],
@@ -87,10 +158,11 @@ export class DeduplicationService {
     registry: Map<string, { photo: PhotoEntry; iasNo: string; beneficiaryName: string }>
   ): { duplicates: DuplicateMatch[]; isCompromised: boolean } {
     const duplicates: DuplicateMatch[] = [];
-    const MAX_HAMMING_DISTANCE_512 = 10; // < 2.0% variance threshold
+    const MAX_PHASH_DISTANCE_64 = 4; // Frequency-domain variance threshold (< 6.25%)
+    const MAX_DHASH_DISTANCE_512 = 10; // Spatial gradient variance threshold (< 2.0%)
 
     for (const p of incoming) {
-      // 1. Exact MD5 check (O(1))
+      // 1. Layer 1: Exact MD5 check (O(1))
       if (registry.has(p.md5)) {
         const match = registry.get(p.md5)!;
         if (match.iasNo !== iasNo) {
@@ -107,25 +179,47 @@ export class DeduplicationService {
         }
       }
 
-      // 2. Dual 512-bit Perceptual Hash Check
+      // 2. Cross-check against all registered photos within the same functional slot
       for (const [_, item] of registry.entries()) {
-        if (item.iasNo !== iasNo && item.photo.dHash && p.dHash) {
-          // Compare only within same functional photo slot (slot-constrained matching)
+        if (item.iasNo !== iasNo) {
           const isSameSlot = item.photo.slotId === p.slotId || item.photo.label === p.label;
-          const dist = this.hammingDistance(item.photo.dHash, p.dHash);
+          if (!isSameSlot) continue;
 
-          if (isSameSlot && dist <= MAX_HAMMING_DISTANCE_512) {
-            if (!duplicates.some((d) => d.unit1 === item.iasNo && d.photo2 === p.filename)) {
-              duplicates.push({
-                photo1: item.photo.filename,
-                unit1: item.iasNo,
-                beneficiary1: item.beneficiaryName,
-                photo2: p.filename,
-                unit2: iasNo,
-                beneficiary2: beneficiaryName,
-                hashType: 'PHASH_SIMILAR',
-                hammingDistance: dist,
-              });
+          // Layer 2: 64-bit DCT pHash check (Rescaled/Recompressed duplicates)
+          if (item.photo.pHash && p.pHash) {
+            const pDist = this.hammingDistance(item.photo.pHash, p.pHash);
+            if (pDist <= MAX_PHASH_DISTANCE_64) {
+              if (!duplicates.some((d) => d.unit1 === item.iasNo && d.photo2 === p.filename)) {
+                duplicates.push({
+                  photo1: item.photo.filename,
+                  unit1: item.iasNo,
+                  beneficiary1: item.beneficiaryName,
+                  photo2: p.filename,
+                  unit2: iasNo,
+                  beneficiary2: beneficiaryName,
+                  hashType: 'PHASH_DCT_SIMILAR',
+                  hammingDistance: pDist,
+                });
+              }
+            }
+          }
+
+          // Layer 3: 512-bit Dual dHash check (Spatial gradient correlation)
+          if (item.photo.dHash && p.dHash) {
+            const dDist = this.hammingDistance(item.photo.dHash, p.dHash);
+            if (dDist <= MAX_DHASH_DISTANCE_512) {
+              if (!duplicates.some((d) => d.unit1 === item.iasNo && d.photo2 === p.filename)) {
+                duplicates.push({
+                  photo1: item.photo.filename,
+                  unit1: item.iasNo,
+                  beneficiary1: item.beneficiaryName,
+                  photo2: p.filename,
+                  unit2: iasNo,
+                  beneficiary2: beneficiaryName,
+                  hashType: 'DHASH_SPATIAL_SIMILAR',
+                  hammingDistance: dDist,
+                });
+              }
             }
           }
         }
@@ -138,3 +232,4 @@ export class DeduplicationService {
     };
   }
 }
+

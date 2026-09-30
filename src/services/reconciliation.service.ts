@@ -41,6 +41,7 @@ export class ReconciliationService {
 
       const md5 = DeduplicationService.calculateMd5(buffer);
       const dHash = await DeduplicationService.computeDHash(buffer);
+      const pHash = await DeduplicationService.computePHash(buffer);
 
       photoEntries.push({
         slotId: p.slotId,
@@ -50,6 +51,7 @@ export class ReconciliationService {
         fileBuffer: buffer,
         md5,
         dHash,
+        pHash,
         capturedAt: p.capturedAt || new Date().toISOString(),
         isMock: p.isMock ?? true,
       });
